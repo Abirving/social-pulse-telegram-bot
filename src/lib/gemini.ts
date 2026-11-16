@@ -23,7 +23,7 @@ export async function analyzeUploadedVideoDraft(
 ): Promise<VideoRoastAIResponse> {
   const uploadedFile = await ai.files.upload({
     file: localFilePath,
-    mimeType,
+    config: { mimeType },
   });
 
   // Poll until Gemini File API finishes processing the video stream

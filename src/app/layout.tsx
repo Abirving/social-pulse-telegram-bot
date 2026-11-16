@@ -1,0 +1,19 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "SocialPulse AI — Agency Telegram Strategist Bot",
+  description:
+    "AI social media management & analytics Telegram bot for TikTok and Instagram.",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
