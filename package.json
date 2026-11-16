@@ -11,7 +11,7 @@
     "bot:poll": "tsx src/scripts/poll.ts"
   },
   "dependencies": {
-    "@google/genai": "^0.1.2",
+    "@google/genai": "^3.3.0",
     "@supabase/supabase-js": "^2.48.1",
     "apify-client": "^2.11.0",
     "grammy": "^1.34.0",
