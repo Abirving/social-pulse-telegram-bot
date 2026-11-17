@@ -33,6 +33,9 @@ const allowedIds = (process.env.ALLOWED_TELEGRAM_USER_IDS || "")
 const activeJobs = new Map<number, { cancelled: boolean; statusMsgId?: number }>();
 const JOB_TIMEOUT_MS = 45_000;
 
+// Remembers each user's last topic/handle so the action buttons can regenerate content
+const lastTopicByUser = new Map<number, string>();
+
 function withTimeout<T>(promise: Promise<T>, ms = JOB_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((_, reject) => {
@@ -43,10 +46,13 @@ function withTimeout<T>(promise: Promise<T>, ms = JOB_TIMEOUT_MS): Promise<T> {
   });
 }
 
+// One-line loading message + 🛑 Cancel button that triggers the /stop logic
+const cancelKb = () => new InlineKeyboard().text("🛑 Cancel", "stop_job");
+
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (allowedIds.length > 0 && userId && !allowedIds.includes(userId)) {
-    await ctx.reply("🔒 This is a private agency social media analytics bot.");
+    await ctx.reply("🔒 Private agency bot.");
     return;
   }
   await next();
@@ -55,19 +61,26 @@ bot.use(async (ctx, next) => {
 // ============================================================================
 // 0. /stop — Cancel Any Running Scrape / AI Task
 // ============================================================================
+async function stopActiveJob(ctx: any): Promise<boolean> {
+  const userId = ctx.from?.id || 0;
+  const job = activeJobs.get(userId);
+  if (!job) return false;
+  job.cancelled = true;
+  activeJobs.delete(userId);
+  return true;
+}
+
 bot.command("stop", async (ctx) => {
   const userId = ctx.from?.id || 0;
   const job = activeJobs.get(userId);
-
   if (!job) {
-    await ctx.reply("ℹ️ No active task to stop.");
+    await ctx.reply("ℹ️ Nothing running.");
     return;
   }
-
   job.cancelled = true;
   activeJobs.delete(userId);
 
-  const text = "🛑 Stopped the current task.";
+  const text = "🛑 Stopped.";
   if (job.statusMsgId) {
     await ctx.api
       .editMessageText(ctx.chat.id, job.statusMsgId, text)
@@ -78,32 +91,27 @@ bot.command("stop", async (ctx) => {
 });
 
 // ============================================================================
-// 1. /start & /help — Agency Control Center
+// 1. /start & /help — Minimal Control Center
 // ============================================================================
 bot.command(["start", "help"], async (ctx) => {
   const userId = ctx.from?.id || 0;
   const activeBrand = await getActiveBrandProfile(userId);
+  const lastAudit = await getLastAuditForSession(userId);
+  const tracked = lastAudit?.kpis?.handle ? `@${lastAudit.kpis.handle}` : "—";
 
   const kb = new InlineKeyboard()
-    .text("👥 Switch / Add Client", "menu_clients")
-    .text("🎯 Hook & Hashtag Guide", "menu_hooks_help")
+    .text("📊 Audit", "menu_audit")
+    .text("🎯 Hooks", "menu_hooks")
     .row()
-    .text("📊 How to Run /audit", "menu_audit_help")
-    .text("🎬 Pre-Post Video Roast", "menu_video_help");
+    .text("🕵️ Spy", "menu_spy")
+    .text("👥 Clients", "menu_clients")
+    .row()
+    .text("🛑 Stop", "stop_job");
 
   await ctx.reply(
-    `🚀 *SocialPulse AI — Agency Social Media Strategist*\n\n` +
-      `🏷 *Active Client Profile:* ${escapeMd(activeBrand.brand_name)}\n` +
-      `🎯 *Niche:* ${escapeMd(activeBrand.niche)}\n` +
-      `👥 *Audience:* ${escapeMd(activeBrand.target_audience)}\n\n` +
-      `*Core Commands:*\n` +
-      `• \`/audit tiktok @handle\` — Scrape last 12 posts, calculate KPIs & get next steps\n` +
-      `• \`/audit ig @handle\` — Audit an Instagram profile's reels & engagement\n` +
-      `• \`/hooks <topic or product>\` — Generate 4 English + Amharic hooks, script & 3-tier hashtags\n` +
-      `• \`/spy tiktok @competitor\` — Extract competitor winning hooks & content gaps\n` +
-      `• \`/addclient Name | Niche | Audience\` — Save a new client profile\n` +
-      `• \`/clients\` — Switch active client workspace\n` +
-      `• *Upload any draft video (.mp4/.mov)* — Multimodal 3-second hook & pacing roast`,
+    `🚀 *SocialPulse AI*\n` +
+      `🏷 Client: *${escapeMd(activeBrand.brand_name)}*\n` +
+      `📡 Tracked: ${escapeMd(tracked)}`,
     { parse_mode: "Markdown", reply_markup: kb }
   );
 });
@@ -117,12 +125,7 @@ bot.command("addclient", async (ctx) => {
   const parts = raw.split("|").map((s) => s.trim());
 
   if (parts.length < 2) {
-    await ctx.reply(
-      "📋 *Add a Client Brand Workspace*\n\n" +
-        "Format:\n`/addclient Brand Name | Niche | Target Audience`\n\n" +
-        "Example:\n`/addclient Bole Luxe Fashion | Women's Boutique & E-Commerce | Addis Ababa shoppers 18-35`",
-      { parse_mode: "Markdown" }
-    );
+    await ctx.reply("📋 `/addclient Brand | Niche | Audience`", { parse_mode: "Markdown" });
     return;
   }
 
@@ -130,11 +133,7 @@ bot.command("addclient", async (ctx) => {
   const created = await createClientBrand(userId, brandName, niche, targetAudience, "bilingual");
 
   await ctx.reply(
-    `✅ *Client Workspace Created & Activated!*\n\n` +
-      `🏷 *Brand:* ${escapeMd(created.brand_name)}\n` +
-      `🎯 *Niche:* ${escapeMd(created.niche)}\n` +
-      `👥 *Audience:* ${escapeMd(created.target_audience)}\n\n` +
-      `All future \`/audit\`, \`/hooks\`, \`/spy\`, and video roasts are now tailored to *${escapeMd(created.brand_name)}*.`,
+    `✅ *${escapeMd(created.brand_name)}* is now active\n🎯 ${escapeMd(created.niche)}`,
     { parse_mode: "Markdown" }
   );
 });
@@ -150,24 +149,23 @@ bot.command("clients", async (ctx) => {
     kb.text(`${prefix}${b.brand_name}`, `switch_brand:${b.id}`).row();
   });
 
-  await ctx.reply(
-    `🏢 *Your Client Brand Workspaces*\nActive: *${escapeMd(active.brand_name)}*\n\nTap a client below to switch context, or run:\n\`/addclient Name | Niche | Audience\``,
-    { parse_mode: "Markdown", reply_markup: kb }
-  );
+  await ctx.reply(`👥 *Clients* · active: *${escapeMd(active.brand_name)}*`, {
+    parse_mode: "Markdown",
+    reply_markup: kb,
+  });
 });
 
 // ============================================================================
-// 3. /audit <platform> <@handle> — Full KPI & Next-Action Strategist
+// 3. /audit <platform> <@handle> — Tight KPI Audit & Next Action
 // ============================================================================
 async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) {
   const userId = ctx.from?.id || 0;
   const cleanHandle = extractCleanHandle(handle);
   const activeBrand = await getActiveBrandProfile(userId);
 
-  const statusMsg = await ctx.reply(
-    `⏳ Scraping recent ${platform.toUpperCase()} posts for *@${escapeMd(cleanHandle)}* and computing engagement benchmarks for *${escapeMd(activeBrand.brand_name)}*...`,
-    { parse_mode: "Markdown" }
-  );
+  const statusMsg = await ctx.reply(`⏳ Auditing @${cleanHandle}…`, {
+    reply_markup: cancelKb(),
+  });
 
   const job = { cancelled: false, statusMsgId: statusMsg.message_id };
   activeJobs.set(userId, job);
@@ -184,48 +182,36 @@ async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) 
     if (job.cancelled) return;
 
     await saveAuditResult(userId, activeBrand.id, "self_audit", kpis, aiAdvice);
+    lastTopicByUser.set(
+      userId,
+      aiAdvice.nextThreeVideosToFilm?.[0]?.title || kpis.handle
+    );
 
     const hooksFormatted = (aiAdvice.rewrittenHooks || [])
+      .slice(0, 3)
       .map(
         (h, i) =>
-          `*${i + 1}. [${escapeMd(h.style)}]*\n` +
-          `🇬🇧 "${escapeMd(h.englishHook)}"\n` +
-          `🇪🇹 "${escapeMd(h.amharicHook)}"\n` +
-          `🎥 _Visual:_ ${escapeMd(h.visualDirection)}`
-      )
-      .join("\n\n");
-
-    const nextVideos = (aiAdvice.nextThreeVideosToFilm || [])
-      .map(
-        (v, i) =>
-          `*${i + 1}. ${escapeMd(v.title)}* (${escapeMd(v.format)})\n` +
-          `   • *0-3s:* ${escapeMd(v.opening3Seconds)}\n` +
-          `   • *CTA:* ${escapeMd(v.cta)}`
+          `*${i + 1}.* 🇬🇧 "${escapeMd(h.englishHook)}"\n` +
+          `    🇪🇹 "${escapeMd(h.amharicHook)}"`
       )
       .join("\n");
 
     const reportText =
-      `📈 *${platform.toUpperCase()} Audit: @${escapeMd(kpis.handle)}*\n` +
-      `🏷 *Client Context:* ${escapeMd(activeBrand.brand_name)} | *Health Score:* ${aiAdvice.healthScore}/100\n\n` +
-      `*1. Quantitative Benchmarks (${kpis.postsAnalyzed} Posts):*\n` +
-      `• *Avg Views:* ${kpis.avgViews.toLocaleString()} (Median: ${kpis.medianViews.toLocaleString()})\n` +
-      `• *Engagement Rate:* ${kpis.avgEngagementRate}% (Likes: ${kpis.avgLikes}, Comments: ${kpis.avgComments})\n` +
-      `• *Winning Length:* ${escapeMd(kpis.optimalDurationRange)}\n` +
-      `• *Best Posting Windows:* ${escapeMd(kpis.bestPostingHoursUTC3.join(" & "))}\n\n` +
-      `*2. Performance Diagnosis:*\n` +
-      `• *Summary:* ${escapeMd(aiAdvice.executiveDiagnosis)}\n` +
-      `• *Why Top Posts Won:* ${escapeMd(aiAdvice.whyTopPostsWon)}\n` +
-      `• *Why Bottom Posts Dropped:* ${escapeMd(aiAdvice.whyBottomPostsDropped)}\n` +
-      `• *Hook Audit:* ${escapeMd(aiAdvice.hookDiagnosis)}\n\n` +
-      `*3. Next-Post Hooks (English + አማርኛ):*\n${hooksFormatted}\n\n` +
-      `*4. Next 3 Videos to Film:*\n${nextVideos}\n\n` +
-      `🔥 *Single Highest-ROI Action Today:*\n👉 ${escapeMd(aiAdvice.singleNextActionToday)}`;
+      `📈 *${platform.toUpperCase()} @${escapeMd(kpis.handle)}* · ${escapeMd(activeBrand.brand_name)}\n` +
+      `👁 Views: ${kpis.avgViews.toLocaleString()}\n` +
+      `❤️ ER: ${kpis.avgEngagementRate}%\n` +
+      `⏱ Best Length: ${escapeMd(kpis.optimalDurationRange)}\n` +
+      `🕐 Peak Time: ${escapeMd(kpis.bestPostingHoursUTC3.join(" / "))}\n` +
+      `🩺 Health: ${aiAdvice.healthScore}/100\n\n` +
+      `🪝 *Top Hooks*\n${hooksFormatted}\n\n` +
+      `👉 ${escapeMd(aiAdvice.singleNextActionToday)}`;
 
     const actionKb = new InlineKeyboard()
-      .text("🎯 Copy 3-Tier Hashtags", "audit_hashtags")
-      .text("📝 Write Full Script #1", "audit_script_1")
+      .text("🎯 Hashtags", "audit_hashtags")
+      .text("📝 Script", "script_now")
       .row()
-      .text("🔄 Generate 4 More Hooks", "audit_more_hooks");
+      .text("🔄 More Hooks", "more_hooks")
+      .text("🛑 Stop", "stop_job");
 
     if (job.cancelled) return;
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, reportText, {
@@ -238,8 +224,8 @@ async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) 
       ctx.chat.id,
       statusMsg.message_id,
       err.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
-        : `❌ *Audit Failed:* ${escapeMd(err.message || "Unknown error")}`,
+        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        : `❌ Audit failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
   } finally {
@@ -251,14 +237,9 @@ bot.command("audit", async (ctx) => {
   const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
 
   if (args.length < 1) {
-    await ctx.reply(
-      "📊 *Run a Profile Audit*\n\n" +
-        "Usage:\n" +
-        "• `/audit tiktok @username`\n" +
-        "• `/audit ig @username`\n" +
-        "• Or paste a direct profile URL: `/audit https://www.tiktok.com/@username`",
-      { parse_mode: "Markdown" }
-    );
+    await ctx.reply("📊 `/audit tiktok @handle` — or paste a profile link.", {
+      parse_mode: "Markdown",
+    });
     return;
   }
 
@@ -267,30 +248,19 @@ bot.command("audit", async (ctx) => {
 });
 
 // ============================================================================
-// 4. /hooks <topic> — Bilingual Viral Hook, Script, Caption & Hashtag Generator
+// 4. /hooks <topic> — Bilingual Hooks, Script & Hashtags
 // ============================================================================
 bot.command("hooks", async (ctx) => {
   const userId = ctx.from?.id || 0;
   const topic = (ctx.match || "").trim();
 
   if (!topic) {
-    await ctx.reply(
-      "🎯 *Viral Hook, Script & Hashtag Generator*\n\n" +
-        "Usage:\n`/hooks <product, offer, or video topic>`\n\n" +
-        "Examples:\n" +
-        "• `/hooks New leather handbag collection arriving in Bole`\n" +
-        "• `/hooks 3 mistakes people make when buying an apartment in Addis`\n" +
-        "• `/hooks Custom modern kitchen cabinets walkthrough`",
-      { parse_mode: "Markdown" }
-    );
+    await ctx.reply("🎯 `/hooks <product or topic>`", { parse_mode: "Markdown" });
     return;
   }
 
   const activeBrand = await getActiveBrandProfile(userId);
-  const waitMsg = await ctx.reply(
-    `✍️ Crafting English + Amharic hooks, script outline & 3-tier hashtags for *${escapeMd(activeBrand.brand_name)}*...`,
-    { parse_mode: "Markdown" }
-  );
+  const waitMsg = await ctx.reply("⏳ Writing hooks…", { reply_markup: cancelKb() });
 
   const job = { cancelled: false, statusMsgId: waitMsg.message_id };
   activeJobs.set(userId, job);
@@ -300,15 +270,16 @@ bot.command("hooks", async (ctx) => {
 
     if (job.cancelled) return;
 
+    lastTopicByUser.set(userId, topic);
+
     const hooksList = (pack.hooks || [])
+      .slice(0, 3)
       .map(
-        (h, idx) =>
-          `*${idx + 1}. ${escapeMd(h.framework)}*\n` +
-          `🇬🇧 "${escapeMd(h.hookEn)}"\n` +
-          `🇪🇹 "${escapeMd(h.hookAm)}"\n` +
-          `🎬 _First 3s Action:_ ${escapeMd(h.visualAction)}`
+        (h, i) =>
+          `*${i + 1}.* 🇬🇧 "${escapeMd(h.hookEn)}"\n` +
+          `    🇪🇹 "${escapeMd(h.hookAm)}"`
       )
-      .join("\n\n");
+      .join("\n");
 
     const allTags = [
       ...(pack.hashtags?.broad || []),
@@ -317,20 +288,21 @@ bot.command("hooks", async (ctx) => {
     ].join(" ");
 
     const text =
-      `🎯 *Hook & Hashtag Strategy Pack*\n` +
-      `📌 *Topic:* ${escapeMd(pack.topic)} (${escapeMd(activeBrand.brand_name)})\n\n` +
-      `*4 High-Retention Opening Hooks:*\n${hooksList}\n\n` +
-      `*⏱ 25-Second Script Structure:*\n` +
-      `• *0–3s (Hook):* ${escapeMd(pack.shortScriptOutline?.hook0to3s || "")}\n` +
-      `• *3–20s (Body):* ${escapeMd(pack.shortScriptOutline?.valueBody3to20s || "")}\n` +
-      `• *20–25s (CTA):* ${escapeMd(pack.shortScriptOutline?.callToAction || "")}\n\n` +
-      `*📝 English Caption:*\n${escapeMd(pack.captionEn)}\n\n` +
-      `*📝 Amharic Caption (አማርኛ):*\n${escapeMd(pack.captionAm)}\n\n` +
-      `*#️⃣ 3-Tier Hashtag Stack:*\n\`${escapeMd(allTags)}\``;
+      `🎯 *${escapeMd(pack.topic)}* · ${escapeMd(activeBrand.brand_name)}\n\n` +
+      `${hooksList}\n\n` +
+      `📝 ${escapeMd(pack.captionEn)}\n\n` +
+      `#️⃣ \`${escapeMd(allTags)}\``;
+
+    const kb = new InlineKeyboard()
+      .text("🔄 More Hooks", "more_hooks")
+      .text("📝 Script", "script_now")
+      .row()
+      .text("🛑 Stop", "stop_job");
 
     if (job.cancelled) return;
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, text, {
       parse_mode: "Markdown",
+      reply_markup: kb,
     });
   } catch (err: any) {
     if (job.cancelled) return;
@@ -338,8 +310,8 @@ bot.command("hooks", async (ctx) => {
       ctx.chat.id,
       waitMsg.message_id,
       err.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
-        : `❌ *Error generating hooks:* ${escapeMd(err.message || "Unknown error")}`,
+        ? "⏱ Timed out after 45s."
+        : `❌ Hooks failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
   } finally {
@@ -355,13 +327,7 @@ bot.command("spy", async (ctx) => {
   const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
 
   if (args.length < 1) {
-    await ctx.reply(
-      "🕵️‍♂️ *Competitor Gap Spy*\n\n" +
-        "Usage:\n" +
-        "• `/spy tiktok @competitor_handle`\n" +
-        "• `/spy ig @competitor_handle`",
-      { parse_mode: "Markdown" }
-    );
+    await ctx.reply("🕵️ `/spy tiktok @competitor`", { parse_mode: "Markdown" });
     return;
   }
 
@@ -369,10 +335,7 @@ bot.command("spy", async (ctx) => {
   const cleanHandle = extractCleanHandle(handle);
   const activeBrand = await getActiveBrandProfile(userId);
 
-  const waitMsg = await ctx.reply(
-    `🕵️‍♂️ Analyzing *@${escapeMd(cleanHandle)}* on ${platform.toUpperCase()} to uncover winning hooks and content gaps for *${escapeMd(activeBrand.brand_name)}*...`,
-    { parse_mode: "Markdown" }
-  );
+  const waitMsg = await ctx.reply(`⏳ Spying @${cleanHandle}…`, { reply_markup: cancelKb() });
 
   const job = { cancelled: false, statusMsgId: waitMsg.message_id };
   activeJobs.set(userId, job);
@@ -389,45 +352,63 @@ bot.command("spy", async (ctx) => {
     if (job.cancelled) return;
 
     await saveAuditResult(userId, activeBrand.id, "competitor_spy", compKpis, spyReport as any);
+    lastTopicByUser.set(
+      userId,
+      spyReport.stealableVideoIdeas?.[0]?.conceptTitle || cleanHandle
+    );
+
+    const gaps = (spyReport.contentGapsTheyMissed || [])
+      .slice(0, 2)
+      .map((g) => `• ${escapeMd(g)}`)
+      .join("\n");
 
     const stealable = (spyReport.stealableVideoIdeas || [])
+      .slice(0, 2)
       .map(
-        (idea, idx) =>
-          `*${idx + 1}. ${escapeMd(idea.conceptTitle)}*\n` +
-          `🇬🇧 Hook: "${escapeMd(idea.openingHookEn)}"\n` +
-          `🇪🇹 Hook: "${escapeMd(idea.openingHookAm)}"\n` +
-          `💡 _Why it wins:_ ${escapeMd(idea.whyItBeatsCompetitor)}`
+        (idea, i) =>
+          `*${i + 1}. ${escapeMd(idea.conceptTitle)}*\n` +
+          `    🇬🇧 "${escapeMd(idea.openingHookEn)}"\n` +
+          `    🇪🇹 "${escapeMd(idea.openingHookAm)}"`
       )
-      .join("\n\n");
+      .join("\n");
 
     const text =
-      `🕵️‍♂️ *Competitor Intelligence: @${escapeMd(compKpis.handle)}*\n` +
-      `📊 *Avg Views:* ${compKpis.avgViews.toLocaleString()} | *ER:* ${compKpis.avgEngagementRate}% | *Best Length:* ${escapeMd(compKpis.optimalDurationRange)}\n\n` +
-      `*🏆 Why Their Top Posts Work:*\n${escapeMd(spyReport.winningPatternSummary)}\n\n` +
-      `*🕳 Content Gaps They Missed:*\n${(spyReport.contentGapsTheyMissed || []).map((g) => `• ${escapeMd(g)}`).join("\n")}\n\n` +
-      `*🎬 3 Videos You Should Film to Beat Them:*\n${stealable}`;
+      `🕵️ *@${escapeMd(compKpis.handle)}* · ${escapeMd(activeBrand.brand_name)}\n` +
+      `👁 Views: ${compKpis.avgViews.toLocaleString()}\n` +
+      `❤️ ER: ${compKpis.avgEngagementRate}%\n` +
+      `⏱ Best Length: ${escapeMd(compKpis.optimalDurationRange)}\n` +
+      `🕐 Peak Time: ${escapeMd(compKpis.bestPostingHoursUTC3.join(" / "))}\n\n` +
+      `🕳 *Gaps*\n${gaps}\n\n` +
+      `🎬 *Steal These*\n${stealable}`;
+
+    const kb = new InlineKeyboard()
+      .text("📝 Script", "script_now")
+      .text("🔄 More Hooks", "more_hooks")
+      .row()
+      .text("🛑 Stop", "stop_job");
 
     if (job.cancelled) return;
-
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, text, {
       parse_mode: "Markdown",
+      reply_markup: kb,
     });
   } catch (err: any) {
     if (job.cancelled) return;
-    const message =
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      waitMsg.message_id,
       err?.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
-        : `❌ *Competitor Spy Failed:* ${escapeMd(err.message || "Unknown error")}`;
-    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, message, {
-      parse_mode: message.startsWith("❌") ? "Markdown" : undefined,
-    });
+        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        : `❌ Spy failed: ${escapeMd(err.message || "Unknown error")}`,
+      { parse_mode: "Markdown" }
+    );
   } finally {
     if (activeJobs.get(userId) === job) activeJobs.delete(userId);
   }
 });
 
 // ============================================================================
-// 6. Direct Video Upload Handler — Multimodal 3-Second Hook & Pacing Roaster
+// 6. Direct Video Upload — 3-Second Hook & Pacing Roast
 // ============================================================================
 bot.on(["message:video", "message:document"], async (ctx) => {
   const userId = ctx.from?.id || 0;
@@ -436,26 +417,22 @@ bot.on(["message:video", "message:document"], async (ctx) => {
   if (!video) return;
   const mimeType = video.mime_type || "video/mp4";
   if (!mimeType.startsWith("video/")) {
-    await ctx.reply("⚠️ Please upload a video file (`.mp4` or `.mov`) for a multimodal hook & retention audit.");
+    await ctx.reply("⚠️ Send a `.mp4` or `.mov` video.");
     return;
   }
 
   // Telegram Bot API standard download limit is 20MB
   if (video.file_size && video.file_size > 20 * 1024 * 1024) {
-    await ctx.reply(
-      "⚠️ This video is over 20 MB (Telegram Bot API download limit). Please compress or trim the clip to under 20 MB and send it again."
-    );
+    await ctx.reply("⚠️ Video is over 20 MB — compress or trim it first.");
     return;
   }
 
   const activeBrand = await getActiveBrandProfile(userId);
   const userCaptionNote = ctx.message.caption || "";
 
-  const waitMsg = await ctx.reply(
-    `🎬 *Analyzing Draft Video for ${escapeMd(activeBrand.brand_name)}...*\n` +
-      `Inspecting the 0–3s visual/audio hook, frame pacing, and retention drop-off points via Gemini Multimodal API...`,
-    { parse_mode: "Markdown" }
-  );
+  const waitMsg = await ctx.reply("⏳ Watching your video…", { reply_markup: cancelKb() });
+  const job = { cancelled: false, statusMsgId: waitMsg.message_id };
+  activeJobs.set(userId, job);
 
   const tmpFilePath = path.join(os.tmpdir(), `tg_video_${Date.now()}.mp4`);
 
@@ -464,7 +441,7 @@ bot.on(["message:video", "message:document"], async (ctx) => {
     const fileUrl = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
 
     const res = await fetch(fileUrl);
-    if (!res.ok) throw new Error("Could not download video from Telegram servers.");
+    if (!res.ok) throw new Error("Could not download video from Telegram.");
     const arrayBuffer = await res.arrayBuffer();
     fs.writeFileSync(tmpFilePath, Buffer.from(arrayBuffer));
 
@@ -472,50 +449,53 @@ bot.on(["message:video", "message:document"], async (ctx) => {
     const roast = await analyzeUploadedVideoDraft(tmpFilePath, mimeType, activeBrand, userCaptionNote);
     await saveVideoRoastResult(userId, activeBrand.id, video.file_id, durationSec, roast);
 
+    if (job.cancelled) return;
+
+    lastTopicByUser.set(userId, roast.upgradedHooks?.[0]?.angle || activeBrand.niche);
+
     const dropOffs = (roast.timestampedDropOffRisks || [])
-      .map(
-        (d) =>
-          `• *${escapeMd(d.timestamp)}* — ${escapeMd(d.issue)}\n  🔧 _Fix:_ ${escapeMd(d.fix)}`
-      )
+      .slice(0, 3)
+      .map((d) => `• *${escapeMd(d.timestamp)}* ${escapeMd(d.fix)}`)
       .join("\n");
 
     const hooks = (roast.upgradedHooks || [])
+      .slice(0, 2)
       .map(
         (h, i) =>
-          `*${i + 1}. ${escapeMd(h.angle)}*\n` +
-          `🇬🇧 "${escapeMd(h.spokenOrTextEn)}"\n` +
-          `🇪🇹 "${escapeMd(h.spokenOrTextAm)}"\n` +
-          `🎥 _Opening Frame:_ ${escapeMd(h.firstFrameVisual)}`
+          `*${i + 1}.* 🇬🇧 "${escapeMd(h.spokenOrTextEn)}"\n` +
+          `    🇪🇹 "${escapeMd(h.spokenOrTextAm)}"`
       )
-      .join("\n\n");
+      .join("\n");
 
     const replyText =
-      `🎬 *Pre-Post Video & 3-Second Hook Audit*\n` +
-      `🏷 *Client:* ${escapeMd(activeBrand.brand_name)}\n` +
-      `🪝 *Hook Score:* ${roast.hookScoreOutOf10}/10 | ⚡ *Pacing:* ${roast.pacingScoreOutOf10}/10 | 🚨 *Drop-Off Risk:* ${escapeMd(roast.retentionRiskLevel)}\n\n` +
-      `*⏱ First 3 Seconds Verdict (0:00–0:03):*\n${escapeMd(roast.firstThreeSecondsVerdict)}\n\n` +
-      `*📉 Timestamped Retention Fixes:*\n${dropOffs || "• Clean pacing throughout."}\n\n` +
-      `*🔥 3 Stronger Hook Upgrades (EN + አማርኛ):*\n${hooks}\n\n` +
-      `*📝 Ready-to-Post Captions:*\n` +
-      `🇬🇧 ${escapeMd(roast.recommendedCaptionEn)}\n` +
-      `🇪🇹 ${escapeMd(roast.recommendedCaptionAm)}\n\n` +
-      `*#️⃣ Hashtags:*\n\`${escapeMd((roast.hashtagPack || []).join(" "))}\`\n\n` +
-      `✅ *#1 Edit Before Publishing:*\n👉 ${escapeMd(roast.nextStepBeforePosting)}`;
+      `🎬 *Video Roast* · ${escapeMd(activeBrand.brand_name)}\n` +
+      `🪝 Hook: ${roast.hookScoreOutOf10}/10\n` +
+      `⚡ Pacing: ${roast.pacingScoreOutOf10}/10\n` +
+      `🚨 Risk: ${escapeMd(roast.retentionRiskLevel)}\n\n` +
+      `*Fixes*\n${dropOffs || "• Clean pacing."}\n\n` +
+      `*Upgraded Hooks*\n${hooks}\n\n` +
+      `✅ ${escapeMd(roast.nextStepBeforePosting)}`;
 
+    const kb = new InlineKeyboard()
+      .text("🔄 More Hooks", "more_hooks")
+      .text("🛑 Stop", "stop_job");
+
+    if (job.cancelled) return;
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, replyText, {
       parse_mode: "Markdown",
+      reply_markup: kb,
     });
   } catch (err: any) {
+    if (job.cancelled) return;
     await ctx.api.editMessageText(
       ctx.chat.id,
       waitMsg.message_id,
-      `❌ *Video Analysis Failed:* ${escapeMd(err.message || "Unknown error")}`,
+      `❌ Video failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
   } finally {
-    if (fs.existsSync(tmpFilePath)) {
-      fs.unlinkSync(tmpFilePath);
-    }
+    if (activeJobs.get(userId) === job) activeJobs.delete(userId);
+    if (fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath);
   }
 });
 
@@ -525,7 +505,7 @@ bot.on(["message:video", "message:document"], async (ctx) => {
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
 
-  // Ignore slash commands — they are handled by their dedicated command handlers
+  // Ignore slash commands — handled by their dedicated handlers
   if (text.startsWith("/")) return;
 
   const urlMatch = text.match(/https?:\/\/\S+/);
@@ -540,11 +520,9 @@ bot.on("message:text", async (ctx) => {
     }
   }
 
-  await ctx.reply(
-    "💡 Tip: paste a TikTok or Instagram profile link and I'll audit it automatically. " +
-      "You can also upload a `.mp4` draft video for a 3-second hook roast, or use `/hooks <topic>` for bilingual hooks & hashtags.",
-    { parse_mode: "Markdown" }
-  );
+  await ctx.reply("💡 Paste a TikTok/IG link · send a `.mp4` · or `/hooks <topic>`.", {
+    parse_mode: "Markdown",
+  });
 });
 
 // ============================================================================
@@ -554,18 +532,61 @@ bot.on("callback_query:data", async (ctx) => {
   const userId = ctx.from.id;
   const data = ctx.callbackQuery.data;
 
+  if (data === "stop_job") {
+    const stopped = await stopActiveJob(ctx);
+    await ctx.answerCallbackQuery({ text: stopped ? "🛑 Stopped" : "Nothing running" });
+    await ctx
+      .editMessageText("🛑 Stopped.")
+      .catch(() => ctx.reply("🛑 Stopped."));
+    return;
+  }
+
   if (data.startsWith("switch_brand:")) {
     const brandId = data.replace("switch_brand:", "");
     const switched = await switchActiveClientBrand(userId, brandId);
     await ctx.answerCallbackQuery({
-      text: switched ? `Switched to ${switched.brand_name}` : "Could not switch client",
+      text: switched ? `Switched to ${switched.brand_name}` : "Could not switch",
     });
     if (switched) {
-      await ctx.reply(
-        `✅ Active client switched to *${escapeMd(switched.brand_name)}* (${escapeMd(switched.niche)}).`,
-        { parse_mode: "Markdown" }
-      );
+      await ctx.reply(`✅ *${escapeMd(switched.brand_name)}* active`, {
+        parse_mode: "Markdown",
+      });
     }
+    return;
+  }
+
+  if (data === "menu_audit") {
+    await ctx.answerCallbackQuery();
+    await ctx.reply("📊 `/audit tiktok @handle` — or paste a profile link.", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  if (data === "menu_hooks") {
+    await ctx.answerCallbackQuery();
+    await ctx.reply("🎯 `/hooks <product or topic>`", { parse_mode: "Markdown" });
+    return;
+  }
+
+  if (data === "menu_spy") {
+    await ctx.answerCallbackQuery();
+    await ctx.reply("🕵️ `/spy tiktok @competitor`", { parse_mode: "Markdown" });
+    return;
+  }
+
+  if (data === "menu_clients") {
+    await ctx.answerCallbackQuery();
+    const brands = await listClientBrands(userId);
+    const active = await getActiveBrandProfile(userId);
+    const kb = new InlineKeyboard();
+    brands.slice(0, 8).forEach((b) => {
+      kb.text(`${b.id === active.id ? "✅ " : "🏢 "}${b.brand_name}`, `switch_brand:${b.id}`).row();
+    });
+    await ctx.reply(`👥 *Clients* · active: *${escapeMd(active.brand_name)}*`, {
+      parse_mode: "Markdown",
+      reply_markup: kb,
+    });
     return;
   }
 
@@ -573,9 +594,7 @@ bot.on("callback_query:data", async (ctx) => {
     const last = await getLastAuditForSession(userId);
     await ctx.answerCallbackQuery();
     if (!last) {
-      await ctx.reply("Run `/audit tiktok @handle` first to generate a hashtag stack.", {
-        parse_mode: "Markdown",
-      });
+      await ctx.reply("Run `/audit tiktok @handle` first.", { parse_mode: "Markdown" });
       return;
     }
     const hs = last.ai.hashtagStrategy;
@@ -585,82 +604,47 @@ bot.on("callback_query:data", async (ctx) => {
       ...(hs?.localAndIntent || []),
     ].join(" ");
 
-    await ctx.reply(
-      `#️⃣ *3-Tier Hashtag Stack for @${escapeMd(last.kpis.handle)}*\n\n` +
-        `• *Broad Niche:* ${escapeMd((hs?.broadNiche || []).join(" "))}\n` +
-        `• *Category:* ${escapeMd((hs?.midVolumeCategory || []).join(" "))}\n` +
-        `• *Local / High-Intent:* ${escapeMd((hs?.localAndIntent || []).join(" "))}\n\n` +
-        `*Tap to Copy All:*\n\`${escapeMd(combined)}\``,
-      { parse_mode: "Markdown" }
-    );
-    return;
-  }
-
-  if (data === "audit_script_1") {
-    const last = await getLastAuditForSession(userId);
-    await ctx.answerCallbackQuery({ text: "Generating script..." });
-    if (!last || !last.ai.nextThreeVideosToFilm?.[0]) {
-      await ctx.reply("Run `/audit tiktok @handle` first.", { parse_mode: "Markdown" });
-      return;
-    }
-    const videoIdea = last.ai.nextThreeVideosToFilm[0];
-    const activeBrand = await getActiveBrandProfile(userId);
-    const pack = await generateHooksAndHashtagsForTopic(videoIdea.title, activeBrand);
-
-    await ctx.reply(
-      `🎬 *Ready-to-Shoot Script: ${escapeMd(videoIdea.title)}*\n\n` +
-        `• *0–3s (Hook):* ${escapeMd(pack.shortScriptOutline.hook0to3s)}\n` +
-        `• *3–20s (Body):* ${escapeMd(pack.shortScriptOutline.valueBody3to20s)}\n` +
-        `• *20–25s (CTA):* ${escapeMd(pack.shortScriptOutline.callToAction)}\n\n` +
-        `🇬🇧 *EN Hook:* "${escapeMd(pack.hooks?.[0]?.hookEn || "")}"\n` +
-        `🇪🇹 *AM Hook:* "${escapeMd(pack.hooks?.[0]?.hookAm || "")}"`,
-      { parse_mode: "Markdown" }
-    );
-    return;
-  }
-
-  if (data === "audit_more_hooks") {
-    const last = await getLastAuditForSession(userId);
-    await ctx.answerCallbackQuery({ text: "Writing 4 new hooks..." });
-    const activeBrand = await getActiveBrandProfile(userId);
-    const topic = last?.ai.nextThreeVideosToFilm?.[0]?.title || activeBrand.niche;
-    const pack = await generateHooksAndHashtagsForTopic(topic, activeBrand);
-
-    const list = (pack.hooks || [])
-      .map(
-        (h, i) =>
-          `*${i + 1}. ${escapeMd(h.framework)}*\n🇬🇧 "${escapeMd(h.hookEn)}"\n🇪🇹 "${escapeMd(h.hookAm)}"`
-      )
-      .join("\n\n");
-
-    await ctx.reply(`🔥 *4 Fresh Hooks for ${escapeMd(activeBrand.brand_name)}:*\n\n${list}`, {
+    await ctx.reply(`#️⃣ *@${escapeMd(last.kpis.handle)}*\n\`${escapeMd(combined)}\``, {
       parse_mode: "Markdown",
     });
     return;
   }
 
-  await ctx.answerCallbackQuery();
-  if (data === "menu_clients") {
-    await ctx.reply(
-      "Use `/clients` to view and switch between your client brands, or `/addclient Brand Name | Niche | Audience` to add a new client.",
-      { parse_mode: "Markdown" }
-    );
-  } else if (data === "menu_hooks_help") {
-    await ctx.reply(
-      "Send `/hooks <product or video topic>` to get 4 bilingual (English + Amharic) viral hooks, a 25-second script, and a 3-tier hashtag pack.",
-      { parse_mode: "Markdown" }
-    );
-  } else if (data === "menu_audit_help") {
-    await ctx.reply(
-      "Send `/audit tiktok @handle` or `/audit ig @handle` to scrape the last 12 posts, calculate engagement rate & best posting hours, and get next-step advice.",
-      { parse_mode: "Markdown" }
-    );
-  } else if (data === "menu_video_help") {
-    await ctx.reply(
-      "Directly upload or forward any unposted `.mp4` or `.mov` video (under 20MB) into this chat. The bot will watch it frame-by-frame and critique your 3-second hook and pacing!",
-      { parse_mode: "Markdown" }
-    );
+  if (data === "more_hooks") {
+    await ctx.answerCallbackQuery({ text: "Writing fresh hooks…" });
+    const activeBrand = await getActiveBrandProfile(userId);
+    const topic = lastTopicByUser.get(userId) || activeBrand.niche;
+    const pack = await generateHooksAndHashtagsForTopic(topic, activeBrand);
+    const list = (pack.hooks || [])
+      .slice(0, 3)
+      .map(
+        (h, i) =>
+          `*${i + 1}.* 🇬🇧 "${escapeMd(h.hookEn)}"\n` + `    🇪🇹 "${escapeMd(h.hookAm)}"`
+      )
+      .join("\n");
+    await ctx.reply(`🔥 *Fresh Hooks* · ${escapeMd(topic)}\n\n${list}`, {
+      parse_mode: "Markdown",
+    });
+    return;
   }
+
+  if (data === "script_now") {
+    await ctx.answerCallbackQuery({ text: "Writing script…" });
+    const activeBrand = await getActiveBrandProfile(userId);
+    const topic = lastTopicByUser.get(userId) || activeBrand.niche;
+    const pack = await generateHooksAndHashtagsForTopic(topic, activeBrand);
+    const s = pack.shortScriptOutline;
+    await ctx.reply(
+      `📝 *Script* · ${escapeMd(topic)}\n` +
+        `• *0–3s:* ${escapeMd(s?.hook0to3s || "")}\n` +
+        `• *3–20s:* ${escapeMd(s?.valueBody3to20s || "")}\n` +
+        `• *20–25s:* ${escapeMd(s?.callToAction || "")}`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  await ctx.answerCallbackQuery();
 });
 
 // ============================================================================
