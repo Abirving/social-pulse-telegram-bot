@@ -1,11 +1,15 @@
 import { GoogleGenAI } from "@google/genai";
 import {
   AuditAIResponse,
+  BioAndProfileFix,
   BrandProfile,
+  CommentAndDmFunnel,
   CompetitorSpyResponse,
   ComputedAccountKPIs,
   HookAndHashtagPack,
+  SevenDayGrowthPlan,
   VideoRoastAIResponse,
+  WinnerCloneAndFlopFix,
 } from "../types/social";
 
 const ai = new GoogleGenAI({
@@ -296,7 +300,7 @@ Client Brand Profile:
 - Goal: ${brand.primary_goal}
 
 Write 4 distinct hooks using proven viral frameworks (1. Curiosity Gap, 2. Contrarian / Mistake Warning, 3. Specific Numbers / Proof, 4. Relatable Local POV) in BOTH punchy English and authentic, conversational Amharic (አማርኛ) as spoken in Addis Ababa.
-Also provide a tight 25-second script outline, ready-to-paste English & Amharic captions, and a 3-tier hashtag stack.
+Also provide a tight 25-second script outline, a 5-scene CapCut shot list (exact time ranges: 0-2s, 2-6s, 6-12s, 12-18s, 18-22s — each with the Visual Cut, On-Screen Text, and Audio), ready-to-paste English & Amharic captions, and a 3-tier hashtag stack.
 
 Return STRICT JSON:
 {
@@ -314,6 +318,14 @@ Return STRICT JSON:
     "valueBody3to20s": "...",
     "callToAction": "..."
   },
+  "capcutShotList": [
+    {
+      "timeRange": "0-2s",
+      "visualCut": "...",
+      "onScreenText": "...",
+      "audio": "..."
+    }
+  ],
   "captionEn": "...",
   "captionAm": "...",
   "hashtags": {
@@ -381,4 +393,179 @@ Return STRICT JSON:
   });
 
   return JSON.parse(response.text || "{}") as CompetitorSpyResponse;
+}
+
+/**
+ * 5. Bio & Pinned Post Optimizer — 3 high-converting bios + 3 pinned video concepts.
+ */
+export async function generateBioAndProfileFix(
+  kpis: ComputedAccountKPIs,
+  brand: BrandProfile
+): Promise<BioAndProfileFix> {
+  const prompt = `
+You are a conversion-focused social profile strategist for TikTok & Instagram.
+Account: @${kpis.handle} (${kpis.platform.toUpperCase()})
+Client Brand: ${brand.brand_name} | Niche: ${brand.niche}
+Target Audience: ${brand.target_audience}
+Primary Goal: ${brand.primary_goal}
+Top Performing Hashtags: ${kpis.topPerformingHashtags.join(", ") || "None"}
+Best Posting Windows (EAT / UTC+3): ${kpis.bestPostingHoursUTC3.join(", ")}
+
+Write 3 high-converting profile bios (one English, one Amharic / አማርኛ, one Bilingual). Each bio must state a clear value proposition and end with a direct call to action (DM, link, order).
+Then propose 3 must-film "Pinned Video" concepts to sit at the top of the grid — the strongest door-openers for a first-time visitor.
+
+Return STRICT JSON:
+{
+  "bios": [
+    { "language": "English", "bio": "..." },
+    { "language": "Amharic", "bio": "..." },
+    { "language": "Bilingual", "bio": "..." }
+  ],
+  "pinnedVideoConcepts": [
+    { "title": "...", "concept": "...", "openingHook": "...", "cta": "..." }
+  ]
+}`;
+
+  const response = await callGeminiWithRetry({
+    model: MODEL_NAME,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0.5,
+    },
+  });
+
+  return JSON.parse(response.text || "{}") as BioAndProfileFix;
+}
+
+/**
+ * 6. 7-Day Growth Plan — a daily content calendar rotating Viral Reach / Proof / Offer pillars.
+ */
+export async function generateSevenDayGrowthPlan(
+  kpis: ComputedAccountKPIs,
+  brand: BrandProfile
+): Promise<SevenDayGrowthPlan> {
+  const prompt = `
+You are a social content planner. Build a 7-day posting calendar (Day 1–7) for @${kpis.handle} (${kpis.platform.toUpperCase()}).
+Client Brand: ${brand.brand_name} | Niche: ${brand.niche}
+Target Audience: ${brand.target_audience}
+Primary Goal: ${brand.primary_goal}
+Best Posting Windows (EAT / UTC+3): ${kpis.bestPostingHoursUTC3.join(", ")}
+Optimal Video Length: ${kpis.optimalDurationRange}
+Top Performing Hashtags: ${kpis.topPerformingHashtags.join(", ") || "None"}
+
+Rotate the content pillar each day among exactly these three values: "Viral Reach", "Proof/Behind-the-Scenes", "Offer/CTA".
+For each day give the posting time (use the EAT / UTC+3 windows above), the pillar, a bilingual hook (English + Amharic / አማርኛ), and the visual format.
+
+Return STRICT JSON:
+{
+  "days": [
+    {
+      "day": 1,
+      "postingTimeUTC3": "18:30",
+      "pillar": "Viral Reach",
+      "bilingualHookEn": "...",
+      "bilingualHookAm": "...",
+      "visualFormat": "Talking head + B-roll / POV / Product demo"
+    }
+  ]
+}`;
+
+  const response = await callGeminiWithRetry({
+    model: MODEL_NAME,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0.5,
+    },
+  });
+
+  return JSON.parse(response.text || "{}") as SevenDayGrowthPlan;
+}
+
+/**
+ * 7. Winner Clone & Flop Fix — replicate the #1 post pattern and reshoot the worst post.
+ */
+export async function generateWinnerCloneAndFlopFix(
+  kpis: ComputedAccountKPIs,
+  brand: BrandProfile
+): Promise<WinnerCloneAndFlopFix> {
+  const prompt = `
+You are a growth analyst studying @${kpis.handle} (${kpis.platform.toUpperCase()}).
+Client Brand: ${brand.brand_name} | Niche: ${brand.niche}
+Target Audience: ${brand.target_audience}
+Primary Goal: ${brand.primary_goal}
+
+#1 WINNING POST:
+${JSON.stringify(kpis.topPosts?.[0] ?? null, null, 2)}
+
+WORST-PERFORMING POST:
+${JSON.stringify(kpis.bottomPosts?.[0] ?? null, null, 2)}
+
+Lock onto the winning pattern behind the #1 post and design 3 sequels that replicate it. Then diagnose exactly why the worst post flopped and give an exact reshoot fix (step-by-step) with a new hook in English + Amharic (አማርኛ).
+
+Return STRICT JSON:
+{
+  "winningPattern": "...",
+  "sequelIdeas": [
+    { "title": "...", "hookEn": "...", "hookAm": "...", "whyItWorks": "..." }
+  ],
+  "flopDiagnosis": "...",
+  "reshootFix": {
+    "originalPostIssue": "...",
+    "exactReshootSteps": ["..."],
+    "newHookEn": "...",
+    "newHookAm": "..."
+  }
+}`;
+
+  const response = await callGeminiWithRetry({
+    model: MODEL_NAME,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0.4,
+    },
+  });
+
+  return JSON.parse(response.text || "{}") as WinnerCloneAndFlopFix;
+}
+
+/**
+ * 8. Comment & DM Funnel — algorithm-boosting pinned comments + a bilingual DM closing script.
+ */
+export async function generateCommentAndDmFunnel(
+  kpis: ComputedAccountKPIs,
+  brand: BrandProfile
+): Promise<CommentAndDmFunnel> {
+  const prompt = `
+You are a conversion copywriter for TikTok & Instagram commerce accounts.
+Account: @${kpis.handle} (${kpis.platform.toUpperCase()})
+Client Brand: ${brand.brand_name} | Niche: ${brand.niche}
+Target Audience: ${brand.target_audience}
+Primary Goal: ${brand.primary_goal}
+
+1. Write 3 pinned comments that boost the algorithm (for example a price reveal or a poll/vote trigger) — each with the comment text and the trigger it creates (comments, saves, or DMs).
+2. Write a 3-step DM closing script in BOTH English and Amharic (አማርኛ) that converts "ዋጋ ስንት ነው? / Price?" inquiries into orders or site visits.
+
+Return STRICT JSON:
+{
+  "pinnedComments": [
+    { "trigger": "Drives comment replies", "comment": "..." }
+  ],
+  "dmClosingScript": [
+    { "step": 1, "label": "Acknowledge & Qualify", "english": "...", "amharic": "..." }
+  ]
+}`;
+
+  const response = await callGeminiWithRetry({
+    model: MODEL_NAME,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      temperature: 0.5,
+    },
+  });
+
+  return JSON.parse(response.text || "{}") as CommentAndDmFunnel;
 }

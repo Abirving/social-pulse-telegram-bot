@@ -15,10 +15,22 @@ import { extractCleanHandle, fetchAndComputeSocialKPIs } from "./scraper";
 import {
   analyzeUploadedVideoDraft,
   generateAccountAuditAdvice,
+  generateBioAndProfileFix,
+  generateCommentAndDmFunnel,
   generateCompetitorSpyReport,
   generateHooksAndHashtagsForTopic,
+  generateSevenDayGrowthPlan,
+  generateWinnerCloneAndFlopFix,
 } from "./gemini";
-import { SocialPlatform } from "../types/social";
+import {
+  BioAndProfileFix,
+  BrandProfile,
+  CommentAndDmFunnel,
+  ComputedAccountKPIs,
+  SevenDayGrowthPlan,
+  SocialPlatform,
+  WinnerCloneAndFlopFix,
+} from "../types/social";
 
 const token = process.env.TELEGRAM_BOT_TOKEN || "REPLACE_WITH_TELEGRAM_BOT_TOKEN";
 export const bot = new Bot(token);
@@ -209,6 +221,12 @@ async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) 
     const actionKb = new InlineKeyboard()
       .text("🎯 Hashtags", "audit_hashtags")
       .text("📝 Script", "script_now")
+      .row()
+      .text("🪪 Fix Bio & Pinned", "audit_bio")
+      .text("📅 7-Day Plan", "audit_7day")
+      .row()
+      .text("🧬 Clone #1 Winner", "audit_clone")
+      .text("💬 Comment & DM Funnel", "audit_dm")
       .row()
       .text("🔄 More Hooks", "more_hooks")
       .text("🛑 Stop", "stop_job");
@@ -405,6 +423,23 @@ bot.command("spy", async (ctx) => {
   } finally {
     if (activeJobs.get(userId) === job) activeJobs.delete(userId);
   }
+});
+
+// ============================================================================
+// 5b. /bio & /plan — One-Tap Account Growth Tools
+// ============================================================================
+bot.command("bio", async (ctx) => {
+  const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+  await runAggregateToolFlow(ctx, args, "⏳ Optimizing bio…", async (kpis, brand) =>
+    formatBioFix(kpis, await generateBioAndProfileFix(kpis, brand))
+  );
+});
+
+bot.command("plan", async (ctx) => {
+  const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+  await runAggregateToolFlow(ctx, args, "⏳ Building 7-day plan…", async (kpis, brand) =>
+    formatSevenDayPlan(kpis, await generateSevenDayGrowthPlan(kpis, brand))
+  );
 });
 
 // ============================================================================
@@ -634,12 +669,53 @@ bot.on("callback_query:data", async (ctx) => {
     const topic = lastTopicByUser.get(userId) || activeBrand.niche;
     const pack = await generateHooksAndHashtagsForTopic(topic, activeBrand);
     const s = pack.shortScriptOutline;
+    const shots = (pack.capcutShotList || [])
+      .map(
+        (shot) =>
+          `*${escapeMd(shot.timeRange)}* · ${escapeMd(shot.visualCut)}\n` +
+          `    🅰️ ${escapeMd(shot.onScreenText)}\n` +
+          `    🔊 ${escapeMd(shot.audio)}`
+      )
+      .join("\n");
     await ctx.reply(
       `📝 *Script* · ${escapeMd(topic)}\n` +
         `• *0–3s:* ${escapeMd(s?.hook0to3s || "")}\n` +
         `• *3–20s:* ${escapeMd(s?.valueBody3to20s || "")}\n` +
-        `• *20–25s:* ${escapeMd(s?.callToAction || "")}`,
+        `• *20–25s:* ${escapeMd(s?.callToAction || "")}` +
+        (shots ? `\n\n🎬 *CapCut Shot List*\n${shots}` : ""),
       { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  if (data === "audit_bio") {
+    await ctx.answerCallbackQuery();
+    await runAggregateToolFlow(ctx, [], "⏳ Optimizing bio…", async (kpis, brand) =>
+      formatBioFix(kpis, await generateBioAndProfileFix(kpis, brand))
+    );
+    return;
+  }
+
+  if (data === "audit_7day") {
+    await ctx.answerCallbackQuery();
+    await runAggregateToolFlow(ctx, [], "⏳ Building 7-day plan…", async (kpis, brand) =>
+      formatSevenDayPlan(kpis, await generateSevenDayGrowthPlan(kpis, brand))
+    );
+    return;
+  }
+
+  if (data === "audit_clone") {
+    await ctx.answerCallbackQuery();
+    await runAggregateToolFlow(ctx, [], "⏳ Cloning your #1 winner…", async (kpis, brand) =>
+      formatWinnerClone(kpis, await generateWinnerCloneAndFlopFix(kpis, brand))
+    );
+    return;
+  }
+
+  if (data === "audit_dm") {
+    await ctx.answerCallbackQuery();
+    await runAggregateToolFlow(ctx, [], "⏳ Writing comment + DM funnel…", async (kpis, brand) =>
+      formatCommentDmFunnel(kpis, await generateCommentAndDmFunnel(kpis, brand))
     );
     return;
   }
@@ -650,6 +726,154 @@ bot.on("callback_query:data", async (ctx) => {
 // ============================================================================
 // Helpers
 // ============================================================================
+// Resolves KPIs for a one-tap tool: scrape the passed @handle, else reuse the
+// user's last audit from getLastAuditForSession.
+async function resolveKpisForUser(
+  ctx: any,
+  args: string[]
+): Promise<ComputedAccountKPIs | null> {
+  const userId = ctx.from?.id || 0;
+  if (args.length > 0) {
+    const { platform, handle } = parsePlatformAndHandle(args);
+    return fetchAndComputeSocialKPIs(platform, extractCleanHandle(handle), 12);
+  }
+  const last = await getLastAuditForSession(userId);
+  return last?.kpis || null;
+}
+
+// Shared "⏳ → result" flow for the one-tap account growth tools.
+async function runAggregateToolFlow(
+  ctx: any,
+  args: string[],
+  loadingText: string,
+  render: (kpis: ComputedAccountKPIs, brand: BrandProfile) => Promise<string>
+): Promise<void> {
+  const userId = ctx.from?.id || 0;
+  const activeBrand = await getActiveBrandProfile(userId);
+
+  const waitMsg = await ctx.reply(loadingText, { reply_markup: cancelKb() });
+  const job = { cancelled: false, statusMsgId: waitMsg.message_id };
+  activeJobs.set(userId, job);
+
+  try {
+    const result = await withTimeout(
+      (async () => {
+        const kpis = await resolveKpisForUser(ctx, args);
+        if (!kpis) return null;
+        const text = await render(kpis, activeBrand);
+        return { kpis, text };
+      })()
+    );
+
+    if (job.cancelled) return;
+
+    if (!result) {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        waitMsg.message_id,
+        "📊 Run `/audit tiktok @handle` first — or pass one: `/bio @handle`.",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    lastTopicByUser.set(userId, result.kpis.handle);
+    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, result.text, {
+      parse_mode: "Markdown",
+    });
+  } catch (err: any) {
+    if (job.cancelled) return;
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      waitMsg.message_id,
+      err?.message === "TIMEOUT"
+        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        : `❌ Failed: ${escapeMd(err?.message || "Unknown error")}`,
+      { parse_mode: "Markdown" }
+    );
+  } finally {
+    if (activeJobs.get(userId) === job) activeJobs.delete(userId);
+  }
+}
+
+function formatBioFix(kpis: ComputedAccountKPIs, data: BioAndProfileFix): string {
+  const bios = (data.bios || [])
+    .slice(0, 3)
+    .map((b) => `*${escapeMd(b.language)}*\n${escapeMd(b.bio)}`)
+    .join("\n\n");
+  const pinned = (data.pinnedVideoConcepts || [])
+    .slice(0, 3)
+    .map(
+      (p, i) =>
+        `*${i + 1}. ${escapeMd(p.title)}*\n${escapeMd(p.concept)}\n` +
+        `🪝 ${escapeMd(p.openingHook)}\n👉 ${escapeMd(p.cta)}`
+    )
+    .join("\n\n");
+
+  return `🪪 *Fix Bio & Pinned* · @${escapeMd(kpis.handle)}\n\n${bios}\n\n📌 *Pinned Videos*\n${pinned}`;
+}
+
+function formatSevenDayPlan(kpis: ComputedAccountKPIs, data: SevenDayGrowthPlan): string {
+  const days = (data.days || [])
+    .slice(0, 7)
+    .map(
+      (d) =>
+        `*Day ${d.day}* · ${escapeMd(d.postingTimeUTC3)} · ${escapeMd(d.pillar)}\n` +
+        `🇬🇧 "${escapeMd(d.bilingualHookEn)}"\n` +
+        `🇪🇹 "${escapeMd(d.bilingualHookAm)}"\n` +
+        `🎬 ${escapeMd(d.visualFormat)}`
+    )
+    .join("\n\n");
+
+  return `📅 *7-Day Plan* · @${escapeMd(kpis.handle)}\n\n${days}`;
+}
+
+function formatWinnerClone(kpis: ComputedAccountKPIs, data: WinnerCloneAndFlopFix): string {
+  const sequels = (data.sequelIdeas || [])
+    .slice(0, 3)
+    .map(
+      (s, i) =>
+        `*${i + 1}. ${escapeMd(s.title)}*\n` +
+        `🇬🇧 "${escapeMd(s.hookEn)}"\n` +
+        `🇪🇹 "${escapeMd(s.hookAm)}"\n` +
+        `• ${escapeMd(s.whyItWorks)}`
+    )
+    .join("\n\n");
+  const steps = (data.reshootFix?.exactReshootSteps || [])
+    .map((step, i) => `${i + 1}. ${escapeMd(step)}`)
+    .join("\n");
+
+  return (
+    `🧬 *Clone #1 Winner* · @${escapeMd(kpis.handle)}\n` +
+    `🏆 ${escapeMd(data.winningPattern)}\n\n${sequels}\n\n` +
+    `🚑 *Flop Fix*\n${escapeMd(data.flopDiagnosis)}\n${steps}\n` +
+    `🇬🇧 "${escapeMd(data.reshootFix?.newHookEn || "")}"\n` +
+    `🇪🇹 "${escapeMd(data.reshootFix?.newHookAm || "")}"`
+  );
+}
+
+function formatCommentDmFunnel(kpis: ComputedAccountKPIs, data: CommentAndDmFunnel): string {
+  const comments = (data.pinnedComments || [])
+    .slice(0, 3)
+    .map((c, i) => `*${i + 1}. ${escapeMd(c.trigger)}*\n📌 ${escapeMd(c.comment)}`)
+    .join("\n\n");
+  const dm = (data.dmClosingScript || [])
+    .slice(0, 3)
+    .map(
+      (s) =>
+        `*${s.step}. ${escapeMd(s.label)}*\n` +
+        `🇬🇧 ${escapeMd(s.english)}\n` +
+        `🇪🇹 ${escapeMd(s.amharic)}`
+    )
+    .join("\n\n");
+
+  return (
+    `💬 *Comment & DM Funnel* · @${escapeMd(kpis.handle)}\n\n` +
+    `📌 *Pinned Comments*\n${comments}\n\n` +
+    `📥 *DM Closing Script*\n${dm}`
+  );
+}
+
 function parsePlatformAndHandle(args: string[]): {
   platform: SocialPlatform;
   handle: string;

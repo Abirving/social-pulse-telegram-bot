@@ -109,6 +109,12 @@ export interface HookAndHashtagPack {
     valueBody3to20s: string;
     callToAction: string;
   };
+  capcutShotList?: {
+    timeRange: string;
+    visualCut: string;
+    onScreenText: string;
+    audio: string;
+  }[];
   captionEn: string;
   captionAm: string;
   hashtags: {
@@ -128,5 +134,59 @@ export interface CompetitorSpyResponse {
     openingHookEn: string;
     openingHookAm: string;
     whyItBeatsCompetitor: string;
+  }[];
+}
+
+export interface BioAndProfileFix {
+  bios: {
+    language: "English" | "Amharic" | "Bilingual";
+    bio: string;
+  }[];
+  pinnedVideoConcepts: {
+    title: string;
+    concept: string;
+    openingHook: string;
+    cta: string;
+  }[];
+}
+
+export interface SevenDayGrowthPlan {
+  days: {
+    day: number;
+    postingTimeUTC3: string;
+    pillar: "Viral Reach" | "Proof/Behind-the-Scenes" | "Offer/CTA";
+    bilingualHookEn: string;
+    bilingualHookAm: string;
+    visualFormat: string;
+  }[];
+}
+
+export interface WinnerCloneAndFlopFix {
+  winningPattern: string;
+  sequelIdeas: {
+    title: string;
+    hookEn: string;
+    hookAm: string;
+    whyItWorks: string;
+  }[];
+  flopDiagnosis: string;
+  reshootFix: {
+    originalPostIssue: string;
+    exactReshootSteps: string[];
+    newHookEn: string;
+    newHookAm: string;
+  };
+}
+
+export interface CommentAndDmFunnel {
+  pinnedComments: {
+    trigger: string;
+    comment: string;
+  }[];
+  dmClosingScript: {
+    step: number;
+    label: string;
+    english: string;
+    amharic: string;
   }[];
 }

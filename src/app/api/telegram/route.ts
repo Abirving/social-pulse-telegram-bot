@@ -6,6 +6,8 @@ export const maxDuration = 60; // Allow up to 60s on Vercel for Apify scraping +
 
 const BOT_COMMANDS = [
   { command: "stop", description: "Stop the currently running scrape or AI task" },
+  { command: "bio", description: "Optimize profile bio & 3 pinned video ideas" },
+  { command: "plan", description: "Generate a 7-day growth & posting calendar" },
 ];
 
 // Dedupe Telegram webhook retries so Apify/Gemini only run once per update
