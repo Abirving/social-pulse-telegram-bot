@@ -28,12 +28,21 @@ export async function fetchAndComputeSocialKPIs(
   let posts: NormalizedSocialPost[] = [];
 
   if (platform === "tiktok") {
+    // Fast path: the public tikwm.com API returns recent posts in ~1-2s,
+    // avoiding the 40s Apify cold start entirely.
+    const fastPosts = await fetchTikTokViaTikwm(cleanHandle);
+    if (fastPosts && fastPosts.length > 0) {
+      return computeMetricsFromPosts("tiktok", cleanHandle, fastPosts);
+    }
+
+    // Fallback: Apify (runs as light as possible to stay inside the timeout)
     const run = await client.actor("clockworks/tiktok-scraper").call(
       {
         profiles: [cleanHandle],
-        resultsPerPage: maxPosts,
+        resultsPerPage: 5,
         shouldDownloadVideos: false,
         shouldDownloadCovers: false,
+        shouldDownloadSubtitles: false,
       },
       { waitSecs: 25 }
     );
@@ -111,6 +120,56 @@ export async function fetchAndComputeSocialKPIs(
   }
 
   return computeMetricsFromPosts(platform, cleanHandle, posts);
+}
+
+/**
+ * Fast TikTok post fetcher via the public tikwm.com API (~1-2s).
+ * Returns null when the API is unavailable or has no videos, so the caller
+ * can fall back to Apify.
+ */
+async function fetchTikTokViaTikwm(
+  cleanHandle: string
+): Promise<NormalizedSocialPost[] | null> {
+  try {
+    const res = await fetch(
+      `https://www.tikwm.com/api/user/posts?unique_id=${encodeURIComponent(cleanHandle)}&count=8`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) return null;
+
+    const json: any = await res.json();
+    const videos: any[] = json?.data?.videos || [];
+    if (!Array.isArray(videos) || videos.length === 0) return null;
+
+    return videos.map((v: any): NormalizedSocialPost => {
+      const views = Number(v.play_count ?? 0);
+      const likes = Number(v.digg_count ?? 0);
+      const comments = Number(v.comment_count ?? 0);
+      const shares = Number(v.share_count ?? 0);
+      const caption = String(v.title ?? "");
+      const engagementRate =
+        views > 0 ? Number((((likes + comments + shares) / views) * 100).toFixed(2)) : 0;
+
+      return {
+        id: String(v.video_id ?? Math.random()),
+        platform: "tiktok",
+        url: `https://www.tiktok.com/@${cleanHandle}/video/${v.video_id}`,
+        caption,
+        hashtags: extractHashtagsFromText(caption),
+        views,
+        likes,
+        comments,
+        shares,
+        durationSeconds: Number(v.duration ?? 15),
+        publishedAt: v.create_time
+          ? new Date(v.create_time * 1000).toISOString()
+          : new Date().toISOString(),
+        engagementRate,
+      };
+    });
+  } catch {
+    return null;
+  }
 }
 
 export function computeMetricsFromPosts(

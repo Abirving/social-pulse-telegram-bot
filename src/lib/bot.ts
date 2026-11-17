@@ -43,7 +43,7 @@ const allowedIds = (process.env.ALLOWED_TELEGRAM_USER_IDS || "")
 
 // In-memory registry of running tasks per user so /stop can cancel them
 const activeJobs = new Map<number, { cancelled: boolean; statusMsgId?: number }>();
-const JOB_TIMEOUT_MS = 45_000;
+const JOB_TIMEOUT_MS = 55_000;
 
 // Remembers each user's last topic/handle so the action buttons can regenerate content
 const lastTopicByUser = new Map<number, string>();
@@ -242,7 +242,7 @@ async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) 
       ctx.chat.id,
       statusMsg.message_id,
       err.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        ? "⏱ Timed out after 55s — try a smaller/public @handle."
         : `❌ Audit failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
@@ -328,7 +328,7 @@ bot.command("hooks", async (ctx) => {
       ctx.chat.id,
       waitMsg.message_id,
       err.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s."
+        ? "⏱ Timed out after 55s."
         : `❌ Hooks failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
@@ -416,7 +416,7 @@ bot.command("spy", async (ctx) => {
       ctx.chat.id,
       waitMsg.message_id,
       err?.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        ? "⏱ Timed out after 55s — try a smaller/public @handle."
         : `❌ Spy failed: ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
@@ -787,7 +787,7 @@ async function runAggregateToolFlow(
       ctx.chat.id,
       waitMsg.message_id,
       err?.message === "TIMEOUT"
-        ? "⏱ Timed out after 45s — try a smaller/public @handle."
+        ? "⏱ Timed out after 55s — try a smaller/public @handle."
         : `❌ Failed: ${escapeMd(err?.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
