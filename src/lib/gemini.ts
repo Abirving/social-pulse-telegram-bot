@@ -8,14 +8,16 @@ import {
   VideoRoastAIResponse,
 } from "../types/social";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-// Stable, free-tier friendly model ids. gemini-flash-latest is an official alias
-// that always points at a currently supported model, so we try it first.
-const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-flash-latest";
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || "",
+  httpOptions: { apiVersion: "v1beta" },
+});
+// Valid Google AI Studio model ids. The first entry is overridable via GEMINI_MODEL.
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const FALLBACK_MODELS = [
-  "gemini-flash-latest",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
+  process.env.GEMINI_MODEL || "gemini-3.5-flash-lite",
+  "gemini-3.6-flash",
+  "gemini-3.8-flash",
 ];
 const RETRY_DELAY_MS = 1200;
 
@@ -58,11 +60,7 @@ function isUnknownModelGeminiError(err: any): boolean {
 async function callGeminiWithRetry(
   params: Parameters<typeof ai.models.generateContent>[0]
 ) {
-  const primaryModel = (params.model as string) || MODEL_NAME;
-  const modelsToTry = [
-    primaryModel,
-    ...FALLBACK_MODELS.filter((m) => m !== primaryModel),
-  ];
+  const modelsToTry = Array.from(new Set(FALLBACK_MODELS));
 
   let sawQuotaError = false;
   let sawUnknownModelError = false;
@@ -74,12 +72,12 @@ async function callGeminiWithRetry(
         return await ai.models.generateContent({ ...params, model });
       } catch (err: any) {
         if (isQuotaGeminiError(err)) {
-          // Daily quota exceeded — move to the next model immediately
+          // Daily quota exceeded — try the next model immediately
           sawQuotaError = true;
           break;
         }
         if (isUnknownModelGeminiError(err)) {
-          // Model not available for this key — try the next model in the list
+          // Model not available for this key — try the next model immediately
           sawUnknownModelError = true;
           break;
         }
@@ -104,7 +102,7 @@ async function callGeminiWithRetry(
   }
   if (sawUnknownModelError) {
     throw new Error(
-      `None of the configured Gemini models are available for this API key. Set GEMINI_MODEL to a supported model (e.g. gemini-2.5-flash).`
+      `None of the configured Gemini models are available for this API key. Set GEMINI_MODEL to a supported model (e.g. gemini-3.5-flash-lite).`
     );
   }
   throw new Error("Gemini request failed after retries.");
