@@ -9,11 +9,10 @@ import {
 } from "../types/social";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash";
-const FALLBACK_MODEL_NAME = "gemini-3.8-flash-lite";
-
-// Backoff delays between retries on the primary model (2 waits = 3 attempts total)
-const RETRY_DELAYS_MS = [1000, 2500];
+// gemini-3.8-flash only allows ~20 free requests/day, so default to the lite model
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash-lite";
+const FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-3.0-flash"];
+const RETRY_DELAY_MS = 1200;
 
 function getErrorSignals(err: any): string[] {
   return [
@@ -25,56 +24,65 @@ function getErrorSignals(err: any): string[] {
   ].map((signal) => String(signal ?? ""));
 }
 
-// Temporary API spikes that are safe to retry
-function isTransientGeminiError(err: any): boolean {
-  return getErrorSignals(err).some((signal) =>
-    ["503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"].some((token) =>
-      signal.includes(token)
-    )
-  );
-}
-
-// Hard unavailability (503 / UNAVAILABLE) — the only case that triggers the fallback model
+// Temporary spike — a single short retry on the same model is safe
 function isUnavailableGeminiError(err: any): boolean {
   return getErrorSignals(err).some(
     (signal) => signal.includes("503") || signal.includes("UNAVAILABLE")
   );
 }
 
+// Daily free quota exhausted — retrying the same model is pointless
+function isQuotaGeminiError(err: any): boolean {
+  return getErrorSignals(err).some(
+    (signal) => signal.includes("429") || signal.includes("RESOURCE_EXHAUSTED")
+  );
+}
+
 /**
- * Calls Gemini with automatic retries on 503/429/UNAVAILABLE/RESOURCE_EXHAUSTED.
- * Retries the primary model 3 times with backoff, then falls back once to the
- * lite model if the primary model remains unavailable.
+ * Calls Gemini, retrying once on temporary 503/UNAVAILABLE spikes and falling
+ * back across models when the daily free quota (429) is exhausted.
  */
 async function callGeminiWithRetry(
   params: Parameters<typeof ai.models.generateContent>[0]
 ) {
   const primaryModel = (params.model as string) || MODEL_NAME;
+  const modelsToTry = [
+    primaryModel,
+    ...FALLBACK_MODELS.filter((m) => m !== primaryModel),
+  ];
 
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
-    try {
-      return await ai.models.generateContent({ ...params, model: primaryModel });
-    } catch (err: any) {
-      if (!isTransientGeminiError(err)) throw err;
+  let sawQuotaError = false;
 
-      // Still have a backoff wait left — retry the same model after the delay
-      if (attempt < RETRY_DELAYS_MS.length) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
-        continue;
+  for (const model of modelsToTry) {
+    // Max 1 retry per model (2 attempts total)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await ai.models.generateContent({ ...params, model });
+      } catch (err: any) {
+        if (isQuotaGeminiError(err)) {
+          // Daily quota exceeded — move to the next model immediately
+          sawQuotaError = true;
+          break;
+        }
+        if (isUnavailableGeminiError(err)) {
+          // Temporary spike — retry this model once after a short delay
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+            continue;
+          }
+          break;
+        }
+        // Anything else (bad request, auth, etc.) is not retryable
+        throw err;
       }
-
-      // Exhausted retries on an unavailable primary model — fall back once
-      if (primaryModel !== FALLBACK_MODEL_NAME && isUnavailableGeminiError(err)) {
-        return await ai.models.generateContent({
-          ...params,
-          model: FALLBACK_MODEL_NAME,
-        });
-      }
-
-      throw err;
     }
   }
 
+  if (sawQuotaError) {
+    throw new Error(
+      "Daily free Gemini quota reached across fallback models. Enable billing in Google AI Studio or try again after reset."
+    );
+  }
   throw new Error("Gemini request failed after retries.");
 }
 

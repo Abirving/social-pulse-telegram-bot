@@ -14,7 +14,7 @@ const apifyToken = process.env.APIFY_API_TOKEN || "";
 export async function fetchAndComputeSocialKPIs(
   platform: SocialPlatform,
   rawHandleOrUrl: string,
-  maxPosts = 12
+  maxPosts = 6
 ): Promise<ComputedAccountKPIs> {
   const cleanHandle = extractCleanHandle(rawHandleOrUrl);
 
@@ -28,12 +28,15 @@ export async function fetchAndComputeSocialKPIs(
   let posts: NormalizedSocialPost[] = [];
 
   if (platform === "tiktok") {
-    const run = await client.actor("clockworks/tiktok-scraper").call({
-      profiles: [cleanHandle],
-      resultsPerPage: maxPosts,
-      shouldDownloadVideos: false,
-      shouldDownloadCovers: false,
-    });
+    const run = await client.actor("clockworks/tiktok-scraper").call(
+      {
+        profiles: [cleanHandle],
+        resultsPerPage: maxPosts,
+        shouldDownloadVideos: false,
+        shouldDownloadCovers: false,
+      },
+      { waitSecs: 25 }
+    );
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
     posts = (items || []).map((item: Record<string, any>) => {
       const views = Number(item.playCount ?? item.views ?? 0);
@@ -63,11 +66,14 @@ export async function fetchAndComputeSocialKPIs(
       };
     });
   } else {
-    const run = await client.actor("apify/instagram-scraper").call({
-      directUrls: [`https://www.instagram.com/${cleanHandle}/`],
-      resultsType: "posts",
-      resultsLimit: maxPosts,
-    });
+    const run = await client.actor("apify/instagram-scraper").call(
+      {
+        directUrls: [`https://www.instagram.com/${cleanHandle}/`],
+        resultsType: "posts",
+        resultsLimit: maxPosts,
+      },
+      { waitSecs: 25 }
+    );
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
     posts = (items || []).map((item: Record<string, any>) => {
       const views = Number(item.videoViewCount ?? item.videoPlayCount ?? (Number(item.likesCount || 0) * 8));
