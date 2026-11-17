@@ -5,6 +5,10 @@ import { bot } from "@/lib/bot";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // Allow up to 60s on Vercel for Apify scraping + Gemini video analysis
 
+const BOT_COMMANDS = [
+  { command: "stop", description: "Stop the currently running scrape or AI task" },
+];
+
 const handleUpdate = webhookCallback(bot, "std/http");
 
 export async function POST(req: NextRequest) {
@@ -26,6 +30,7 @@ export async function GET(req: NextRequest) {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || req.nextUrl.origin;
     const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram`;
     await bot.api.setWebhook(webhookUrl);
+    await bot.api.setMyCommands(BOT_COMMANDS);
     return NextResponse.json({
       ok: true,
       message: `Telegram webhook registered to ${webhookUrl}`,

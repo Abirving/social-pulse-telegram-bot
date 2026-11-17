@@ -16,7 +16,7 @@ export async function fetchAndComputeSocialKPIs(
   rawHandleOrUrl: string,
   maxPosts = 12
 ): Promise<ComputedAccountKPIs> {
-  const cleanHandle = extractHandle(rawHandleOrUrl);
+  const cleanHandle = extractCleanHandle(rawHandleOrUrl);
 
   if (!apifyToken) {
     throw new Error(
@@ -184,18 +184,18 @@ export function computeMetricsFromPosts(
   };
 }
 
-function extractHandle(input: string): string {
-  const trimmed = input.trim();
-  if (trimmed.includes("tiktok.com/@")) {
-    return trimmed.split("tiktok.com/@")[1].split(/[/?#]/)[0];
+export function extractCleanHandle(input: string): string {
+  const trimmed = (input || "").trim();
+
+  const tiktokMatch = trimmed.match(/tiktok\.com\/@([^/?#\s]+)/i);
+  if (tiktokMatch) return tiktokMatch[1].replace(/^@/, "");
+
+  const instaMatch = trimmed.match(/instagram\.com\/([^/?#\s]+)/i);
+  if (instaMatch && !/^(p|reel|reels|stories|tv)$/i.test(instaMatch[1])) {
+    return instaMatch[1].replace(/^@/, "");
   }
-  if (trimmed.includes("instagram.com/")) {
-    return trimmed
-      .split("instagram.com/")[1]
-      .replace(/^p\/|^reel\//, "")
-      .split(/[/?#]/)[0];
-  }
-  return trimmed.replace(/^@/, "");
+
+  return trimmed.replace(/^@/, "").split(/[/?#\s]/)[0];
 }
 
 function extractHashtagsFromText(text: string): string[] {

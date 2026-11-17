@@ -11,7 +11,7 @@ import {
   saveVideoRoastResult,
   switchActiveClientBrand,
 } from "./supabase";
-import { fetchAndComputeSocialKPIs } from "./scraper";
+import { extractCleanHandle, fetchAndComputeSocialKPIs } from "./scraper";
 import {
   analyzeUploadedVideoDraft,
   generateAccountAuditAdvice,
@@ -29,6 +29,20 @@ const allowedIds = (process.env.ALLOWED_TELEGRAM_USER_IDS || "")
   .map((s) => Number(s.trim()))
   .filter((n) => !isNaN(n) && n > 0);
 
+// In-memory registry of running tasks per user so /stop can cancel them
+const activeJobs = new Map<number, { cancelled: boolean; statusMsgId?: number }>();
+const JOB_TIMEOUT_MS = 45_000;
+
+function withTimeout<T>(promise: Promise<T>, ms = JOB_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("TIMEOUT")), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   if (allowedIds.length > 0 && userId && !allowedIds.includes(userId)) {
@@ -36,6 +50,31 @@ bot.use(async (ctx, next) => {
     return;
   }
   await next();
+});
+
+// ============================================================================
+// 0. /stop — Cancel Any Running Scrape / AI Task
+// ============================================================================
+bot.command("stop", async (ctx) => {
+  const userId = ctx.from?.id || 0;
+  const job = activeJobs.get(userId);
+
+  if (!job) {
+    await ctx.reply("ℹ️ No active task to stop.");
+    return;
+  }
+
+  job.cancelled = true;
+  activeJobs.delete(userId);
+
+  const text = "🛑 Stopped the current task.";
+  if (job.statusMsgId) {
+    await ctx.api
+      .editMessageText(ctx.chat.id, job.statusMsgId, text)
+      .catch(() => ctx.reply(text));
+  } else {
+    await ctx.reply(text);
+  }
 });
 
 // ============================================================================
@@ -122,16 +161,28 @@ bot.command("clients", async (ctx) => {
 // ============================================================================
 async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) {
   const userId = ctx.from?.id || 0;
+  const cleanHandle = extractCleanHandle(handle);
   const activeBrand = await getActiveBrandProfile(userId);
 
   const statusMsg = await ctx.reply(
-    `⏳ Scraping recent ${platform.toUpperCase()} posts for *@${escapeMd(handle)}* and computing engagement benchmarks for *${escapeMd(activeBrand.brand_name)}*...`,
+    `⏳ Scraping recent ${platform.toUpperCase()} posts for *@${escapeMd(cleanHandle)}* and computing engagement benchmarks for *${escapeMd(activeBrand.brand_name)}*...`,
     { parse_mode: "Markdown" }
   );
 
+  const job = { cancelled: false, statusMsgId: statusMsg.message_id };
+  activeJobs.set(userId, job);
+
   try {
-    const kpis = await fetchAndComputeSocialKPIs(platform, handle, 12);
-    const aiAdvice = await generateAccountAuditAdvice(kpis, activeBrand);
+    const { kpis, aiAdvice } = await withTimeout(
+      (async () => {
+        const kpis = await fetchAndComputeSocialKPIs(platform, cleanHandle, 12);
+        const aiAdvice = await generateAccountAuditAdvice(kpis, activeBrand);
+        return { kpis, aiAdvice };
+      })()
+    );
+
+    if (job.cancelled) return;
+
     await saveAuditResult(userId, activeBrand.id, "self_audit", kpis, aiAdvice);
 
     const hooksFormatted = (aiAdvice.rewrittenHooks || [])
@@ -176,17 +227,23 @@ async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) 
       .row()
       .text("🔄 Generate 4 More Hooks", "audit_more_hooks");
 
+    if (job.cancelled) return;
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, reportText, {
       parse_mode: "Markdown",
       reply_markup: actionKb,
     });
   } catch (err: any) {
+    if (job.cancelled) return;
     await ctx.api.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
-      `❌ *Audit Failed:* ${escapeMd(err.message || "Unknown error")}`,
+      err.message === "TIMEOUT"
+        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
+        : `❌ *Audit Failed:* ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
+  } finally {
+    if (activeJobs.get(userId) === job) activeJobs.delete(userId);
   }
 }
 
@@ -235,8 +292,13 @@ bot.command("hooks", async (ctx) => {
     { parse_mode: "Markdown" }
   );
 
+  const job = { cancelled: false, statusMsgId: waitMsg.message_id };
+  activeJobs.set(userId, job);
+
   try {
-    const pack = await generateHooksAndHashtagsForTopic(topic, activeBrand);
+    const pack = await withTimeout(generateHooksAndHashtagsForTopic(topic, activeBrand));
+
+    if (job.cancelled) return;
 
     const hooksList = (pack.hooks || [])
       .map(
@@ -266,16 +328,22 @@ bot.command("hooks", async (ctx) => {
       `*📝 Amharic Caption (አማርኛ):*\n${escapeMd(pack.captionAm)}\n\n` +
       `*#️⃣ 3-Tier Hashtag Stack:*\n\`${escapeMd(allTags)}\``;
 
+    if (job.cancelled) return;
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, text, {
       parse_mode: "Markdown",
     });
   } catch (err: any) {
+    if (job.cancelled) return;
     await ctx.api.editMessageText(
       ctx.chat.id,
       waitMsg.message_id,
-      `❌ *Error generating hooks:* ${escapeMd(err.message || "Unknown error")}`,
+      err.message === "TIMEOUT"
+        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
+        : `❌ *Error generating hooks:* ${escapeMd(err.message || "Unknown error")}`,
       { parse_mode: "Markdown" }
     );
+  } finally {
+    if (activeJobs.get(userId) === job) activeJobs.delete(userId);
   }
 });
 
@@ -298,16 +366,28 @@ bot.command("spy", async (ctx) => {
   }
 
   const { platform, handle } = parsePlatformAndHandle(args);
+  const cleanHandle = extractCleanHandle(handle);
   const activeBrand = await getActiveBrandProfile(userId);
 
   const waitMsg = await ctx.reply(
-    `🕵️‍♂️ Analyzing *@${escapeMd(handle)}* on ${platform.toUpperCase()} to uncover winning hooks and content gaps for *${escapeMd(activeBrand.brand_name)}*...`,
+    `🕵️‍♂️ Analyzing *@${escapeMd(cleanHandle)}* on ${platform.toUpperCase()} to uncover winning hooks and content gaps for *${escapeMd(activeBrand.brand_name)}*...`,
     { parse_mode: "Markdown" }
   );
 
+  const job = { cancelled: false, statusMsgId: waitMsg.message_id };
+  activeJobs.set(userId, job);
+
   try {
-    const compKpis = await fetchAndComputeSocialKPIs(platform, handle, 10);
-    const spyReport = await generateCompetitorSpyReport(compKpis, activeBrand);
+    const { compKpis, spyReport } = await withTimeout(
+      (async () => {
+        const compKpis = await fetchAndComputeSocialKPIs(platform, cleanHandle, 10);
+        const spyReport = await generateCompetitorSpyReport(compKpis, activeBrand);
+        return { compKpis, spyReport };
+      })()
+    );
+
+    if (job.cancelled) return;
+
     await saveAuditResult(userId, activeBrand.id, "competitor_spy", compKpis, spyReport as any);
 
     const stealable = (spyReport.stealableVideoIdeas || [])
@@ -327,16 +407,22 @@ bot.command("spy", async (ctx) => {
       `*🕳 Content Gaps They Missed:*\n${(spyReport.contentGapsTheyMissed || []).map((g) => `• ${escapeMd(g)}`).join("\n")}\n\n` +
       `*🎬 3 Videos You Should Film to Beat Them:*\n${stealable}`;
 
+    if (job.cancelled) return;
+
     await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, text, {
       parse_mode: "Markdown",
     });
   } catch (err: any) {
-    await ctx.api.editMessageText(
-      ctx.chat.id,
-      waitMsg.message_id,
-      `❌ *Competitor Spy Failed:* ${escapeMd(err.message || "Unknown error")}`,
-      { parse_mode: "Markdown" }
-    );
+    if (job.cancelled) return;
+    const message =
+      err?.message === "TIMEOUT"
+        ? "⏱ Timed out after 45s — try a smaller/public @handle or send /stop."
+        : `❌ *Competitor Spy Failed:* ${escapeMd(err.message || "Unknown error")}`;
+    await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, message, {
+      parse_mode: message.startsWith("❌") ? "Markdown" : undefined,
+    });
+  } finally {
+    if (activeJobs.get(userId) === job) activeJobs.delete(userId);
   }
 });
 
