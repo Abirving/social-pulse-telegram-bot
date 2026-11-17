@@ -120,23 +120,8 @@ bot.command("clients", async (ctx) => {
 // ============================================================================
 // 3. /audit <platform> <@handle> — Full KPI & Next-Action Strategist
 // ============================================================================
-bot.command("audit", async (ctx) => {
+async function runAuditFlow(ctx: any, platform: SocialPlatform, handle: string) {
   const userId = ctx.from?.id || 0;
-  const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
-
-  if (args.length < 1) {
-    await ctx.reply(
-      "📊 *Run a Profile Audit*\n\n" +
-        "Usage:\n" +
-        "• `/audit tiktok @username`\n" +
-        "• `/audit ig @username`\n" +
-        "• Or paste a direct profile URL: `/audit https://www.tiktok.com/@username`",
-      { parse_mode: "Markdown" }
-    );
-    return;
-  }
-
-  const { platform, handle } = parsePlatformAndHandle(args);
   const activeBrand = await getActiveBrandProfile(userId);
 
   const statusMsg = await ctx.reply(
@@ -203,6 +188,25 @@ bot.command("audit", async (ctx) => {
       { parse_mode: "Markdown" }
     );
   }
+}
+
+bot.command("audit", async (ctx) => {
+  const args = (ctx.match || "").trim().split(/\s+/).filter(Boolean);
+
+  if (args.length < 1) {
+    await ctx.reply(
+      "📊 *Run a Profile Audit*\n\n" +
+        "Usage:\n" +
+        "• `/audit tiktok @username`\n" +
+        "• `/audit ig @username`\n" +
+        "• Or paste a direct profile URL: `/audit https://www.tiktok.com/@username`",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const { platform, handle } = parsePlatformAndHandle(args);
+  await runAuditFlow(ctx, platform, handle);
 });
 
 // ============================================================================
@@ -430,7 +434,35 @@ bot.on(["message:video", "message:document"], async (ctx) => {
 });
 
 // ============================================================================
-// 7. Inline Keyboard Callback Handlers
+// 7. Plain-Text Auto-Detect — Paste a TikTok / Instagram Link to Auto-Audit
+// ============================================================================
+bot.on("message:text", async (ctx) => {
+  const text = ctx.message.text;
+
+  // Ignore slash commands — they are handled by their dedicated command handlers
+  if (text.startsWith("/")) return;
+
+  const urlMatch = text.match(/https?:\/\/\S+/);
+  if (urlMatch) {
+    if (urlMatch[0].includes("tiktok.com")) {
+      await runAuditFlow(ctx, "tiktok", urlMatch[0]);
+      return;
+    }
+    if (urlMatch[0].includes("instagram.com")) {
+      await runAuditFlow(ctx, "instagram", urlMatch[0]);
+      return;
+    }
+  }
+
+  await ctx.reply(
+    "💡 Tip: paste a TikTok or Instagram profile link and I'll audit it automatically. " +
+      "You can also upload a `.mp4` draft video for a 3-second hook roast, or use `/hooks <topic>` for bilingual hooks & hashtags.",
+    { parse_mode: "Markdown" }
+  );
+});
+
+// ============================================================================
+// 8. Inline Keyboard Callback Handlers
 // ============================================================================
 bot.on("callback_query:data", async (ctx) => {
   const userId = ctx.from.id;
