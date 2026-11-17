@@ -9,9 +9,14 @@ import {
 } from "../types/social";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-// gemini-3.8-flash only allows ~20 free requests/day, so default to the lite model
-const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash-lite";
-const FALLBACK_MODELS = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-3.0-flash"];
+// Stable, free-tier friendly model ids. gemini-flash-latest is an official alias
+// that always points at a currently supported model, so we try it first.
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-flash-latest";
+const FALLBACK_MODELS = [
+  "gemini-flash-latest",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+];
 const RETRY_DELAY_MS = 1200;
 
 function getErrorSignals(err: any): string[] {
@@ -38,9 +43,17 @@ function isQuotaGeminiError(err: any): boolean {
   );
 }
 
+// Model id not found / retired for this API key — try the next model instead
+function isUnknownModelGeminiError(err: any): boolean {
+  return getErrorSignals(err).some(
+    (signal) => signal.includes("404") || signal.includes("NOT_FOUND")
+  );
+}
+
 /**
  * Calls Gemini, retrying once on temporary 503/UNAVAILABLE spikes and falling
- * back across models when the daily free quota (429) is exhausted.
+ * back across models when the daily free quota (429) is exhausted or a model id
+ * is not available for the current API key (404/NOT_FOUND).
  */
 async function callGeminiWithRetry(
   params: Parameters<typeof ai.models.generateContent>[0]
@@ -52,6 +65,7 @@ async function callGeminiWithRetry(
   ];
 
   let sawQuotaError = false;
+  let sawUnknownModelError = false;
 
   for (const model of modelsToTry) {
     // Max 1 retry per model (2 attempts total)
@@ -62,6 +76,11 @@ async function callGeminiWithRetry(
         if (isQuotaGeminiError(err)) {
           // Daily quota exceeded — move to the next model immediately
           sawQuotaError = true;
+          break;
+        }
+        if (isUnknownModelGeminiError(err)) {
+          // Model not available for this key — try the next model in the list
+          sawUnknownModelError = true;
           break;
         }
         if (isUnavailableGeminiError(err)) {
@@ -81,6 +100,11 @@ async function callGeminiWithRetry(
   if (sawQuotaError) {
     throw new Error(
       "Daily free Gemini quota reached across fallback models. Enable billing in Google AI Studio or try again after reset."
+    );
+  }
+  if (sawUnknownModelError) {
+    throw new Error(
+      `None of the configured Gemini models are available for this API key. Set GEMINI_MODEL to a supported model (e.g. gemini-2.5-flash).`
     );
   }
   throw new Error("Gemini request failed after retries.");
