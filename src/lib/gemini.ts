@@ -10,6 +10,74 @@ import {
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const FALLBACK_MODEL_NAME = "gemini-3.8-flash-lite";
+
+// Backoff delays between retries on the primary model (2 waits = 3 attempts total)
+const RETRY_DELAYS_MS = [1000, 2500];
+
+function getErrorSignals(err: any): string[] {
+  return [
+    err?.status,
+    err?.code,
+    err?.error?.status,
+    err?.error?.code,
+    err?.message,
+  ].map((signal) => String(signal ?? ""));
+}
+
+// Temporary API spikes that are safe to retry
+function isTransientGeminiError(err: any): boolean {
+  return getErrorSignals(err).some((signal) =>
+    ["503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"].some((token) =>
+      signal.includes(token)
+    )
+  );
+}
+
+// Hard unavailability (503 / UNAVAILABLE) — the only case that triggers the fallback model
+function isUnavailableGeminiError(err: any): boolean {
+  return getErrorSignals(err).some(
+    (signal) => signal.includes("503") || signal.includes("UNAVAILABLE")
+  );
+}
+
+/**
+ * Calls Gemini with automatic retries on 503/429/UNAVAILABLE/RESOURCE_EXHAUSTED.
+ * Retries the primary model 3 times with backoff, then falls back once to the
+ * lite model if the primary model remains unavailable.
+ */
+async function callGeminiWithRetry(
+  params: Parameters<typeof ai.models.generateContent>[0]
+) {
+  const primaryModel = (params.model as string) || MODEL_NAME;
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await ai.models.generateContent({ ...params, model: primaryModel });
+    } catch (err: any) {
+      if (!isTransientGeminiError(err)) throw err;
+
+      // Still have a backoff wait left — retry the same model after the delay
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+
+      // Exhausted retries on an unavailable primary model — fall back once
+      if (primaryModel !== FALLBACK_MODEL_NAME && isUnavailableGeminiError(err)) {
+        return await ai.models.generateContent({
+          ...params,
+          model: FALLBACK_MODEL_NAME,
+        });
+      }
+
+      throw err;
+    }
+  }
+
+  throw new Error("Gemini request failed after retries.");
+}
+
 
 /**
  * 1. Analyze an uploaded draft video (MP4/MOV) for 3-second hook strength,
@@ -77,7 +145,7 @@ Return STRICT JSON matching this exact structure:
   "nextStepBeforePosting": "..."
 }`;
 
-  const response = await ai.models.generateContent({
+  const response = await callGeminiWithRetry({
     model: MODEL_NAME,
     contents: [
       {
@@ -169,7 +237,7 @@ Return STRICT JSON matching this structure:
   "singleNextActionToday": "..."
 }`;
 
-  const response = await ai.models.generateContent({
+  const response = await callGeminiWithRetry({
     model: MODEL_NAME,
     contents: prompt,
     config: {
@@ -225,7 +293,7 @@ Return STRICT JSON:
   }
 }`;
 
-  const response = await ai.models.generateContent({
+  const response = await callGeminiWithRetry({
     model: MODEL_NAME,
     contents: prompt,
     config: {
@@ -273,7 +341,7 @@ Return STRICT JSON:
   ]
 }`;
 
-  const response = await ai.models.generateContent({
+  const response = await callGeminiWithRetry({
     model: MODEL_NAME,
     contents: prompt,
     config: {
